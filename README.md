@@ -96,7 +96,7 @@ If you prefer to use environment variables instead of command-line arguments:
    npm run inspect-sse
    ```
 
-5. Run the streamable http server(url:[3000](http://localhost:3000/mcp)) and inspector:
+5. Run the streamable http server(url:http://localhost:3000/mcp) and inspector:
    ```
    npm run http
    npm run inspect-http
