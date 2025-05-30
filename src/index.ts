@@ -2,6 +2,12 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js"
+
+import express from "express";
+import { randomUUID } from "node:crypto";
 import dotenv from "dotenv";
 import { GraphQLClient } from "graphql-request";
 import minimist from "minimist";
@@ -27,6 +33,11 @@ dotenv.config();
 const SHOPIFY_ACCESS_TOKEN =
   argv.accessToken || process.env.SHOPIFY_ACCESS_TOKEN;
 const MYSHOPIFY_DOMAIN = argv.domain || process.env.MYSHOPIFY_DOMAIN;
+
+// Server configuration
+const TRANSPORT_TYPE = argv.transport || process.env.TRANSPORT_TYPE || "stdio";
+const HTTP_PORT = parseInt(argv.port || process.env.HTTP_PORT || "3000");
+const SSE_PORT = parseInt(argv.ssePort || process.env.SSE_PORT || "3001");
 
 // Store in process.env for backwards compatibility
 process.env.SHOPIFY_ACCESS_TOKEN = SHOPIFY_ACCESS_TOKEN;
@@ -249,11 +260,153 @@ server.tool(
   }
 );
 
+const app = express();
+app.use(express.json());
+
+// Function to start server with different transports
+async function startServer() {
+  try {
+    switch (TRANSPORT_TYPE.toLowerCase()) {
+      case "stdio":
+        console.error("Starting MCP server with STDIO transport...");
+        const stdioTransport = new StdioServerTransport();
+        await server.connect(stdioTransport);
+        console.error("STDIO server started successfully");
+        break;
+
+      case "sse":
+        console.error(`Starting MCP server with SSE transport on port ${SSE_PORT}...`);
+        const sseTransport = {sse: {} as Record<string, SSEServerTransport>};
+        app.get('/sse', async (req, res) => {
+          const transport = new SSEServerTransport('/messages', res);
+          sseTransport.sse[transport.sessionId] = transport;
+          res.on("close", () => {
+            delete sseTransport.sse[transport.sessionId];
+          });
+
+          await server.connect(transport);
+        });
+
+        app.post('/messages', async (req, res) => {
+          const sessionId = req.query.sessionId as string;
+          const transport = sseTransport.sse[sessionId];
+          if (transport) {
+            await transport.handlePostMessage(req, res, req.body);
+          } else {
+            res.status(400).send('No transport found for sessionId');
+          }
+        });
+
+        app.listen(SSE_PORT);
+        console.error(`SSE server started on http://localhost:${SSE_PORT}/sse`);
+        break;
+
+      case "http":
+        console.error(`Starting MCP server with StreamableHTTP transport on port ${HTTP_PORT}...`);
+        // Map to store transports by session ID
+        const transports: { [sessionId: string]: StreamableHTTPServerTransport } = {};
+
+        // Handle POST requests for client-to-server communication
+        app.post('/mcp', async (req, res) => {
+          // Check for existing session ID
+          const sessionId = req.headers['mcp-session-id'] as string | undefined;
+          let transport: StreamableHTTPServerTransport;
+
+          if (sessionId && transports[sessionId]) {
+            // Reuse existing transport
+            transport = transports[sessionId];
+          } else if (!sessionId && isInitializeRequest(req.body)) {
+            // New initialization request
+            transport = new StreamableHTTPServerTransport({
+              sessionIdGenerator: () => randomUUID(),
+              onsessioninitialized: (sessionId) => {
+                // Store the transport by session ID
+                transports[sessionId] = transport;
+              }
+            });
+
+            // Clean up transport when closed
+            transport.onclose = () => {
+              if (transport.sessionId) {
+                delete transports[transport.sessionId];
+              }
+            };
+            // Connect to the MCP server
+            // The global 'server' instance (with all tools) will be used here
+            await server.connect(transport);
+          } else {
+            // Invalid request
+            res.status(400).json({
+              jsonrpc: '2.0',
+              error: {
+                code: -32000,
+                message: 'Bad Request: No valid session ID provided',
+              },
+              id: null,
+            });
+            return;
+          }
+
+          // Handle the request
+          await transport.handleRequest(req, res, req.body);
+        });
+
+        // Reusable handler for GET and DELETE requests
+        const handleSessionRequest = async (req: express.Request, res: express.Response) => {
+          const sessionId = req.headers['mcp-session-id'] as string | undefined;
+          if (!sessionId || !transports[sessionId]) {
+            res.status(400).send('Invalid or missing session ID');
+            return;
+          }
+
+          const transport = transports[sessionId];
+          await transport.handleRequest(req, res);
+        };
+
+        // Handle GET requests for server-to-client notifications via SSE
+        app.get('/mcp', handleSessionRequest);
+
+        // Handle DELETE requests for session termination
+        app.delete('/mcp', handleSessionRequest);
+
+        app.listen(HTTP_PORT);
+        console.error(`StreamableHTTP server started on http://localhost:${HTTP_PORT}/mcp`);
+        break;
+      default:
+        console.error(`Unknown transport type: ${TRANSPORT_TYPE}`);
+        console.error("Available options: stdio, sse, http, streamable, all");
+        process.exit(1);
+    }
+  } catch (error) {
+    console.error("Failed to start server:", error);
+    process.exit(1);
+  }
+}
+
+// Handle graceful shutdown
+process.on("SIGINT", async () => {
+  console.error("\nReceived SIGINT, shutting down gracefully...");
+  try {
+    await server.close();
+    console.error("Server closed successfully");
+    process.exit(0);
+  } catch (error) {
+    console.error("Error during shutdown:", error);
+    process.exit(1);
+  }
+});
+
+process.on("SIGTERM", async () => {
+  console.error("\nReceived SIGTERM, shutting down gracefully...");
+  try {
+    await server.close();
+    console.error("Server closed successfully");
+    process.exit(0);
+  } catch (error) {
+    console.error("Error during shutdown:", error);
+    process.exit(1);
+  }
+});
+
 // Start the server
-const transport = new StdioServerTransport();
-server
-  .connect(transport)
-  .then(() => {})
-  .catch((error: unknown) => {
-    console.error("Failed to start Shopify MCP Server:", error);
-  });
+startServer();

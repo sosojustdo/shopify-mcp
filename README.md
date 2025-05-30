@@ -79,9 +79,27 @@ If you prefer to use environment variables instead of command-line arguments:
    MYSHOPIFY_DOMAIN=your-store.myshopify.com
    ```
 
-2. Run the server with npx:
+2. Build project code
    ```
-   npx shopify-mcp-server
+   npm run build
+   ```
+
+3. Run the stdio server(Default) and inspector:
+   ```
+   npm start
+   npm run inspect
+   ```
+
+4. Run the sse server(url:http://localhost:3001/sse) and inspector:
+   ```
+   npm run sse
+   npm run inspect-sse
+   ```
+
+5. Run the streamable http server(url:[3000](http://localhost:3000/mcp)) and inspector:
+   ```
+   npm run http
+   npm run inspect-http
    ```
 
 ### Direct Installation (Optional)
