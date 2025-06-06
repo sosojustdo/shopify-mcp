@@ -1,5 +1,7 @@
 FROM node:lts-alpine
 
+RUN apk add --no-cache nginx supervisor
+
 WORKDIR /app
 
 # Copy package files
@@ -14,8 +16,12 @@ COPY . .
 # Build the project
 RUN npm run build
 
-# Expose a port if needed (not strictly required for CLI tool, but in case)
-# EXPOSE 3000
+# Copy nginx.conf and supervisord.conf files
+COPY nginx.conf /etc/nginx/nginx.conf
+COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+
+# Expose nginx port
+EXPOSE 80
 
 # Start the MCP server
-CMD [ "npm", "run", "sse" ]
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
